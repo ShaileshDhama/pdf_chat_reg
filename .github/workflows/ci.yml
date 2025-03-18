@@ -1,0 +1,110 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_IMAGE: pdf-chat-reg
+  DOCKER_REGISTRY: docker.io
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.12]
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio pytest-cov black flake8 mypy isort
+        
+    - name: Run linting
+      run: |
+        black . --check
+        flake8 .
+        mypy .
+        isort . --check-only
+        
+    - name: Run tests with coverage
+      run: |
+        pytest --cov=backend --cov-report=xml
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: 
+      name: production
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Configure Docker metadata
+      # Only run if Docker credentials are available
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ github.repository_owner }}/${{ env.DOCKER_IMAGE }}
+        tags: |
+          type=semver,pattern={{version}}
+          type=ref,event=branch
+          type=sha,format=long
+          latest
+      
+    - name: Login to Docker Hub
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.DOCKER_TOKEN }}
+        
+    - name: Build and push Docker image
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        
+    - name: Install SSH key
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+        
+    - name: Deploy to production
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      env:
+        DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        DOCKER_IMAGE_TAG: ${{ steps.meta.outputs.tags }}
+      run: |
+        ssh -o StrictHostKeyChecking=no $DEPLOY_HOST "
+          export DOCKER_IMAGE_TAG='$DOCKER_IMAGE_TAG' &&
+          cd /opt/pdf-chat-reg &&
+          docker-compose -f docker-compose.prod.yml pull &&
+          docker-compose -f docker-compose.prod.yml up -d
+        "

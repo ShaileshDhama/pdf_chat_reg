@@ -1,0 +1,87 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    image: legale-troy:latest
+    restart: always
+    environment:
+      - DEBUG=0
+      - MAX_UPLOAD_SIZE=10000000
+      - RATE_LIMIT_REQUESTS=100
+      - RATE_LIMIT_PERIOD=3600
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - legale-troy-network
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis-data:/data
+    networks:
+      - legale-troy-network
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - app
+    networks:
+      - legale-troy-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: always
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - legale-troy-network
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: always
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - legale-troy-network
+
+  backup:
+    image: alpine:latest
+    volumes:
+      - ./uploads:/data/uploads:ro
+      - ./backups:/backups
+    command: |
+      sh -c 'while true; do
+        tar czf /backups/backup-$$(date +%Y%m%d-%H%M%S).tar.gz /data/uploads &&
+        find /backups -type f -mtime +7 -delete &&
+        sleep 86400
+      done'
+    networks:
+      - legale-troy-network
+
+volumes:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  legale-troy-network:
+    driver: bridge
